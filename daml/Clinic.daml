@@ -1,0 +1,126 @@
+module Clinic where
+import DA.Optional
+
+
+data PatienttInfo = PatienttInfo with
+    cardId: Text
+    name: Text
+    dateOfBirth: Date
+    gender: Text
+    hasInsurance: Bool
+    insuranceCode: Optional (Text) -- either 1 person or a group of people
+    address: Text -- either the amount in USD or None
+        deriving (Show, Eq, Ord)
+
+
+
+template AppointmentRequest
+    with
+        patient: Party
+        clinic: Party
+        doctor: Party
+
+        patientInfo: PatienttInfo
+        timestamp: Time
+        note: Optional (Text)
+    where
+        signatory patient
+        observer clinic
+        ensure (patientInfo.name) /= ""
+
+        nonconsuming choice CreateRequest : ContractId AppointmentRequest
+            with 
+                patient: Party
+                clinic: Party
+                doctor: Party
+                patientInfo: PatienttInfo
+            controller patient
+                do
+                    create AppointmentRequest
+                        with
+                            ..
+
+
+        choice AcceptRequest :  ContractId Appointment
+            with 
+                patient: Party
+                suggestedAppointmentTime: Time
+                id: Int
+            controller clinic 
+                do
+                    assert (isNone note)
+                    appointment <- lookupByKey @Appointment (clinic, id)
+                    assertMsg "Assertion failure: Duplicate Appointment Id" (isNone appointment)
+                    create Appointment 
+                        with
+                            patient
+                            clinic
+                            doctor
+                            id
+                            appointmentTime = None
+                            suggestedAppointmentTime
+                            executionTime = None
+                            patientInfo
+                            timestamp
+                            executed = False
+            
+        choice RejectRequest :  ContractId AppointmentRequest
+            with
+                feedback: Text
+            controller clinic
+            do
+                create AppointmentRequest with
+                    note = Some feedback
+                    ..
+
+                    
+                
+template Appointment
+    with
+        patient: Party
+        clinic: Party
+        doctor: Party
+
+        id: Int
+        suggestedAppointmentTime: Time
+        appointmentTime: Optional(Time)
+        executionTime: Optional(Time)
+        patientInfo: PatienttInfo
+        timestamp: Time
+        executed: Bool
+    where
+        signatory clinic
+        observer patient, doctor
+        key (clinic, id): (Party, Int)
+        maintainer key._1
+        choice AcceptAppointment : ContractId Appointment
+            controller patient
+                do
+                    create Appointment 
+                        with
+                            appointmentTime = Some suggestedAppointmentTime
+                            ..
+
+
+        choice ExecuteAppointment: ContractId Appointment
+            with
+                --key: (Party, Int)
+                clinic: Party
+                executionTime: Optional(Time)
+                id: Int
+            controller doctor
+                do
+                    assert (isSome appointmentTime)
+                    create Appointment with
+                        executed = True
+                        id = id
+                        ..
+        nonconsuming choice CheckAppointments: (Either([Text])(Text))
+            with
+                appointments: [(ContractId Appointment, Appointment)]
+            controller clinic
+            do
+                if null appointments then return (Right "No Appointments Available")
+                else do
+                    -- 1. map ver.
+                    return (Left $ map (\acc -> "Name " <> acc._2.patientInfo.name <> " : " <> "CardID " <> acc._2.patientInfo.cardId <> " : " <> "Appointment Time "<> show acc._2.appointmentTime) appointments)

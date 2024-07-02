@@ -1,0 +1,256 @@
+module MyTests where 
+
+import Clinic
+import DA.Date (toDateUTC, date, Month(Jan), Month(Mar), Month(Aug), Month(Sep))
+import DA.Time (time)
+import Daml.Script
+import DA.List
+
+
+
+data TestParties = TestParties with
+    patient1: Party
+    patient2: Party
+    clinic: Party
+    doctor: Party
+
+
+setupTestParties : Script TestParties
+setupTestParties = script do
+    --  Allocate parties with the given display name
+    patient1 <- allocatePartyWithHint "Alice" (PartyIdHint "PTT1")
+    patient2 <- allocatePartyWithHint "Bob" (PartyIdHint "PTT2")
+    clinic <- allocatePartyWithHint "My_Clinic" (PartyIdHint "CLNC")
+    doctor <- allocatePartyWithHint "Dr_G" (PartyIdHint "DR")
+
+    return TestParties with
+        patient1
+        patient2
+        clinic
+        doctor
+
+setupUsers : Script (ContractId AppointmentRequest)
+setupUsers = script do
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}) <- setupPatientInfos
+
+    --  Construct user-ids from text
+    clinicId <- validateUserId "My_Clinic"   
+    aliceId <- validateUserId "Alice"
+    bobId <- validateUserId "Bob"
+    doctorId <- validateUserId "Dr_G"
+
+    --  Create users with the given rights 
+    createUser (User clinicId (Some clinic)) [CanActAs clinic]  
+    createUser (User aliceId (Some patient1)) [CanActAs patient1]
+    createUser (User bobId (Some patient2)) [CanActAs patient2]
+    createUser (User doctorId (Some doctor)) [CanActAs doctor]
+    now <- getTime
+    submit patient1 do
+        createCmd AppointmentRequest with
+            patient = patient1
+            clinic = clinic
+            doctor = doctor
+            patientInfo = patientInfo1
+            timestamp = now
+            note = None
+
+    submit patient2 do
+        createCmd AppointmentRequest with
+            patient = patient2
+            clinic = clinic
+            doctor = doctor
+            patientInfo = patientInfo2
+            timestamp = now
+            note = None
+
+data TestPatientInfos = TestPatientInfos with
+    patientInfo1: PatienttInfo
+    patientInfo2: PatienttInfo
+   
+
+setupPatientInfos : Script (TestParties, TestPatientInfos)
+setupPatientInfos = script do
+    testParties@TestParties{..} <- setupTestParties
+
+    let
+        -- create the patient info
+        patientInfo1 = PatienttInfo with
+            cardId = "12345Xb8"
+            name = "Alice"
+            dateOfBirth = date 2000 Mar 12
+            gender = "Female"
+            hasInsurance =  False
+            insuranceCode = None
+            address = "ABC Main Street, NY"
+        
+        patientInfo2 = PatienttInfo with
+            cardId = "2234Cv5"
+            name = "Bob"
+            dateOfBirth = date 1998 Jan 10
+            gender = "Male"
+            hasInsurance =  True
+            insuranceCode = Some "EC29034Y001"
+            address = "ABC Main Street, NY"
+
+        
+
+    return (testParties, TestPatientInfos with {..})
+
+testRequestAppointment: Script (TestParties, TestPatientInfos, ContractId AppointmentRequest)
+testRequestAppointment = script do
+    -- The patient requests an appointment (Alice)
+    now <- getTime
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}) <- setupPatientInfos
+    proposal <- submit patient1 do
+        createCmd AppointmentRequest with
+            patient = patient1
+            clinic = clinic
+            doctor = doctor
+            patientInfo = patientInfo1
+            timestamp = now
+            note = None
+            
+    return (testParties, testPatientInfos, proposal)
+
+testRejectRequest: Script (TestParties, TestPatientInfos, ContractId AppointmentRequest)
+testRejectRequest = script do
+    -- The Clinic rejects the request
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}, proposal) <- testRequestAppointment
+    rejectedProposal <- submit clinic do
+        exerciseCmd proposal RejectRequest with
+            feedback = "Rejected"
+
+    return (testParties, testPatientInfos, rejectedProposal)
+
+
+testAcceptMustFail: Script()
+testAcceptMustFail = script do
+    -- Clinic cannot accept a rejected proposal
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}, rejectedProposal) <- testRejectRequest
+    submitMustFail clinic do
+        exerciseCmd rejectedProposal AcceptRequest with
+            patient = patient1
+            suggestedAppointmentTime = time(date 2024 Aug 10) 10 30 0
+            id = 1
+
+testAcceptRequest: Script (TestParties, TestPatientInfos, ContractId Appointment)
+testAcceptRequest = script do
+    -- Clinic accept the request and suggests an appointment time
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}, proposal) <- testRequestAppointment
+    appointmentID <- submit clinic do
+        exerciseCmd proposal AcceptRequest with
+            patient = patient1
+            suggestedAppointmentTime = time(date 2024 Aug 10) 10 30 0
+            id = 1
+    
+    return (testParties, testPatientInfos, appointmentID)
+
+testAcceptAppointment: Script (TestParties, TestPatientInfos, ContractId Appointment)
+testAcceptAppointment = script do
+    -- The patient accepts the appointment time
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}, appointmentID) <- testAcceptRequest
+    confirmedAppointmentID <- submit patient1 do
+        exerciseCmd appointmentID AcceptAppointment
+
+    return (testParties, testPatientInfos, confirmedAppointmentID)
+
+--  Appointment request from  Bob
+testRequestAppointment2: Script (TestParties, TestPatientInfos, ContractId AppointmentRequest)
+testRequestAppointment2 = script do
+    now <- getTime
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}, confirmedAppointmentID) <- testAcceptAppointment
+    
+    bobProposal <- submit patient2 do
+        createCmd AppointmentRequest with
+            patient = patient2
+            clinic = clinic
+            doctor = doctor
+            patientInfo = patientInfo2
+            timestamp = now
+            note = None
+            
+    return (testParties, testPatientInfos, bobProposal)
+
+testAcceptRequest2: Script (TestParties, TestPatientInfos, ContractId Appointment)
+testAcceptRequest2 = script do
+    -- Clinic accept the request and suggests an appointment time
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}, bobProposal) <- testRequestAppointment2
+    appointmentID <- submit clinic do
+        exerciseCmd bobProposal AcceptRequest with
+            patient = patient2
+            suggestedAppointmentTime = time(date 2024 Sep 18) 10 30 0
+            id = 2
+    
+    return (testParties, testPatientInfos, appointmentID)
+
+-- Clinic cannot have 2 appointments with the same id
+testAcceptFailRequest: Script ()
+testAcceptFailRequest = script do
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}, bobProposal) <- testRequestAppointment2
+    submitMustFail clinic do
+        exerciseCmd bobProposal AcceptRequest with
+            patient = patient2
+            suggestedAppointmentTime = time(date 2024 Aug 10) 10 30 0
+            id = 1
+
+
+testAcceptAppointment2: Script (TestParties, TestPatientInfos, ContractId Appointment)
+testAcceptAppointment2 = script do
+    -- The patient accepts the appointment time
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}, appointmentID) <- testAcceptRequest2
+    confirmedAppointmentID <- submit patient2 do
+        exerciseCmd appointmentID AcceptAppointment
+
+    return (testParties, testPatientInfos, confirmedAppointmentID)
+
+testExecuteAppointment: Script (TestParties, TestPatientInfos, ContractId Appointment)
+testExecuteAppointment = script do
+    -- The doctor execute the appointment for Alice
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}, confirmedAppointmentID) <- testAcceptRequest2
+    appointments <- query @Appointment doctor
+
+    let appointmentID = 1
+    filterAppointment <- queryFilter
+        @Appointment
+        doctor
+        \appointments -> (appointments.id == appointmentID)
+
+    let newappointmentID = (head filterAppointment)._1
+    executedAppointment <- submit doctor do
+        exerciseCmd newappointmentID ExecuteAppointment with 
+            executionTime = Some (time(date 2024 Aug 10) 10 30 0)
+            id = appointmentID
+            clinic = clinic 
+    return (testParties, testPatientInfos, executedAppointment)
+
+--- execute must fail: doctor cannot execute an appointment without appointment date
+testExecuteAppointmentFail: Script()
+testExecuteAppointmentFail =script do
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}, confirmedAppointmentID) <- testAcceptRequest2
+
+    let appointmentID = 2
+    filterAppointment <- queryFilter
+        @Appointment
+        doctor
+        \appointments -> (appointments.id == appointmentID)
+
+    let newappointmentID = (head filterAppointment)._1
+    submitMustFail doctor do
+        exerciseCmd newappointmentID ExecuteAppointment with
+            executionTime = Some (time(date 2024 Aug 10) 10 30 0)
+            id = appointmentID
+            clinic = clinic 
+----
+testCheckAppointments : Script (TestParties, TestPatientInfos, Either([Text])(Text))
+testCheckAppointments = script do
+    -- Clinic check their appointments
+    (testParties@TestParties{..}, testPatientInfos@TestPatientInfos{..}, confirmedAppointmentID) <- testAcceptRequest2
+    queyappointments <- query @Appointment clinic
+    
+    checkAppointments <- submit clinic do
+        exerciseCmd confirmedAppointmentID CheckAppointments with
+            appointments = queyappointments
+    return (testParties, testPatientInfos, checkAppointments)        
+
+
+           
